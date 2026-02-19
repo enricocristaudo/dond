@@ -205,7 +205,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "title": article['title'],
                     "description": article['description'] or "",
                     "url": url,
-                    "full_text": full_text, # CAMPO NUOVO
+                    "full_text": full_text,
                     "source": article['source']['name'],
                     "publishedAt": article['publishedAt']
                 }
@@ -220,7 +220,13 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await log_search_event(user.id, user.username, query, len(articles) if 'articles' in locals() else 0)
 
-    # --- POLLING (Time-based) ---
+    # --- PRIMA DEL POLLING: Salviamo quanti articoli c'erano GIA' ---
+    _, ml_historical, _ = await get_hybrid_score(query)
+    target_count = ml_historical + new_articles_sent
+
+    await log_search_event(user.id, user.username, query, len(articles) if 'articles' in locals() else 0)
+
+    # --- POLLING (Time-based & Stability-based) ---
     timeout_seconds = 600 if new_articles_sent > 0 else 5
     start_time = datetime.now()
     wait_messages = ["🧠 L'AI sta leggendo i testi...", "🐢 Analisi approfondita in corso...", "🔍 Calcolo punteggi..."]
@@ -228,19 +234,45 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_score = None
     ml_c, user_c = 0, 0
 
+    # Variabili per capire se Spark ha smesso di scrivere
+    last_ml_count = ml_historical
+    stable_cycles = 0
+
     while True:
         elapsed = (datetime.now() - start_time).total_seconds()
-        if elapsed > timeout_seconds: break
+        if elapsed > timeout_seconds:
+            break
 
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         score, ml, usr = await get_hybrid_score(query)
 
         if score is not None:
-            final_score = score
-            ml_c, user_c = ml, usr
-            break
+            if new_articles_sent > 0:
+                # STIAMO ASPETTANDO NUOVI ARTICOLI
+                if ml >= target_count:
+                    # Sono arrivati tutti! Possiamo uscire.
+                    final_score, ml_c, user_c = score, ml, usr
+                    break
+                elif ml > ml_historical:
+                    # Ne è arrivato qualcuno, ma forse non tutti. Controlliamo se si è bloccato.
+                    if ml == last_ml_count:
+                        stable_cycles += 1
+                    else:
+                        stable_cycles = 0
+                        last_ml_count = ml
 
+                    # Se il numero di articoli analizzati non sale per 4 controlli di fila (circa 12 secondi),
+                    # diamo per scontato che Spark abbia finito (magari un articolo è andato in errore e non arriverà mai).
+                    if stable_cycles >= 4:
+                        final_score, ml_c, user_c = score, ml, usr
+                        break
+            else:
+                # NESSUN NUOVO ARTICOLO: usciamo subito con i dati storici
+                final_score, ml_c, user_c = score, ml, usr
+                break
+
+        # Feedback visivo all'utente
         if articles_found:
             if int(elapsed) > 0 and int(elapsed) % 15 == 0:
                 msg_index = (int(elapsed) // 15) % len(wait_messages)
@@ -252,6 +284,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode='Markdown'
                     )
                 except Exception: pass
+
             await asyncio.sleep(3)
         else:
             break
