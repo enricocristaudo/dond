@@ -5,12 +5,12 @@ import asyncio
 import re
 import hashlib
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from newsapi import NewsApiClient
-from kafka import KafkaProducer
-from elasticsearch import Elasticsearch
-from newspaper import Article, Config
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup # type: ignore
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler # type: ignore
+from newsapi import NewsApiClient # type: ignore
+from kafka import KafkaProducer # type: ignore
+from elasticsearch import Elasticsearch # type: ignore
+from newspaper import Article, Config # type: ignore
 
 # --- CONFIGURAZIONE ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -44,9 +44,6 @@ def article_exists(article_id):
     È più robusto di es.exists() quando si usano wildcard negli indici.
     """
     try:
-        # Usiamo 'count' invece di 'exists'.
-        # Cerchiamo tra TUTTI gli indici che iniziano con 'articles-analysis-'
-        # se c'è un documento con questo specifico _id.
         query = {
             "query": {
                 "ids": {
@@ -56,7 +53,6 @@ def article_exists(article_id):
         }
         res = es.count(index="articles-analysis-*", body=query)
 
-        # Se il conteggio è > 0, l'articolo esiste già
         return res['count'] > 0
     except Exception as e:
         logging.warning(f"Errore controllo esistenza articolo: {e}")
@@ -78,7 +74,6 @@ def scrape_article(url):
         article.parse()
 
         text = article.text
-        # Prendiamo max 2000 caratteri per non intasare Kafka
         return text[:2000] if text else ""
     except Exception as e:
         logging.warning(f"Scraping fallito per {url}: {e}")
@@ -116,7 +111,6 @@ async def log_search_event(user_id, username, query_text, articles_found_count):
 async def get_hybrid_score(person_name):
     normalized_name = normalize_name(person_name)
 
-    # 1. ML Score
     ml_score = 0.5
     ml_count = 0
     try:
@@ -136,7 +130,6 @@ async def get_hybrid_score(person_name):
                 ml_count = total_ml
     except Exception: pass
 
-    # 2. User Score
     user_score = 0.5
     user_count = 0
     try:
@@ -174,7 +167,6 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     status_msg = await update.message.reply_text(f"📡 **Analisi avviata per: {query}**\nScarico le notizie e le invio all'AI...", parse_mode='Markdown')
 
-    # --- INGESTIONE + SCRAPING ---
     articles_found = False
     new_articles_sent = 0
 
@@ -185,18 +177,15 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if articles:
             articles_found = True
 
-            # Feedback visivo "Sto scaricando..."
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
             for article in articles:
                 url = article['url']
                 article_id = generate_article_id(url)
 
-                # Deduplicazione
                 if article_exists(article_id):
                     continue
 
-                # SCRAPING NEL BOT
                 full_text = scrape_article(url)
 
                 payload = {
@@ -220,13 +209,11 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await log_search_event(user.id, user.username, query, len(articles) if 'articles' in locals() else 0)
 
-    # --- PRIMA DEL POLLING: Salviamo quanti articoli c'erano GIA' ---
     _, ml_historical, _ = await get_hybrid_score(query)
     target_count = ml_historical + new_articles_sent
 
     await log_search_event(user.id, user.username, query, len(articles) if 'articles' in locals() else 0)
 
-    # --- POLLING (Time-based & Stability-based) ---
     timeout_seconds = 600 if new_articles_sent > 0 else 5
     start_time = datetime.now()
     wait_messages = ["🧠 L'AI sta leggendo i testi...", "🐢 Analisi approfondita in corso...", "🔍 Calcolo punteggi..."]
@@ -234,7 +221,6 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_score = None
     ml_c, user_c = 0, 0
 
-    # Variabili per capire se Spark ha smesso di scrivere
     last_ml_count = ml_historical
     stable_cycles = 0
 
@@ -249,30 +235,23 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if score is not None:
             if new_articles_sent > 0:
-                # STIAMO ASPETTANDO NUOVI ARTICOLI
                 if ml >= target_count:
-                    # Sono arrivati tutti! Possiamo uscire.
                     final_score, ml_c, user_c = score, ml, usr
                     break
                 elif ml > ml_historical:
-                    # Ne è arrivato qualcuno, ma forse non tutti. Controlliamo se si è bloccato.
                     if ml == last_ml_count:
                         stable_cycles += 1
                     else:
                         stable_cycles = 0
                         last_ml_count = ml
 
-                    # Se il numero di articoli analizzati non sale per 4 controlli di fila (circa 12 secondi),
-                    # diamo per scontato che Spark abbia finito (magari un articolo è andato in errore e non arriverà mai).
                     if stable_cycles >= 4:
                         final_score, ml_c, user_c = score, ml, usr
                         break
             else:
-                # NESSUN NUOVO ARTICOLO: usciamo subito con i dati storici
                 final_score, ml_c, user_c = score, ml, usr
                 break
 
-        # Feedback visivo all'utente
         if articles_found:
             if int(elapsed) > 0 and int(elapsed) % 15 == 0:
                 msg_index = (int(elapsed) // 15) % len(wait_messages)
@@ -289,7 +268,6 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             break
 
-    # --- RISULTATO ---
     if final_score is not None:
         await update_leaderboard(query, final_score, ml_c, user_c)
 
