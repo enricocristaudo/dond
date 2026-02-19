@@ -1,0 +1,6 @@
+pyspark==3.4.1
+torch
+transformers
+sentencepiece
+kafka-python
+pandas
